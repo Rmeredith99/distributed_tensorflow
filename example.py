@@ -9,7 +9,7 @@ from random import randint
 import os
 
 
-bits = 64
+bits = 32
 # Parameters
 train_batch_size = 50
 train_set_size = 30000
@@ -50,6 +50,11 @@ def get_data(n):
 ####################################
 # Begin distributed code
 
+PATH_TO_LOCAL_LOGS = os.path.expanduser(r'C:\Users\Ryan Meredith\Documents\github\distributed_tensorflow\logs')
+ROOT_PATH_TO_LOCAL_DATA = os.path.expanduser(r'C:\Users\Ryan Meredith\Documents\github\distributed_tensorflow\data')
+
+flags = tf.app.flags
+
 # Get the environment parameters for distributed TensorFlow
 try:
     job_name = os.environ['JOB_NAME']
@@ -57,11 +62,48 @@ try:
     ps_hosts = os.environ['PS_HOSTS']
     worker_hosts = os.environ['WORKER_HOSTS']
 except: # we are not on TensorPort, assuming local, single node
-    task_index = 0
-    ps_hosts = None
-    worker_hosts = None
-        
-        
+	job_name = None    
+	task_index = 0
+	ps_hosts = None
+	worker_hosts = None
+	
+# Flags for configuring the distributed task
+flags.DEFINE_string("job_name", job_name,
+                    "job name: worker or ps")
+flags.DEFINE_integer("task_index", task_index,
+                     "Worker task index, should be >= 0. task_index=0 is "
+                     "the chief worker task that performs the variable "
+                     "initialization and checkpoint handling")
+flags.DEFINE_string("ps_hosts", ps_hosts,
+                    "Comma-separated list of hostname:port pairs")
+flags.DEFINE_string("worker_hosts", worker_hosts,
+                    "Comma-separated list of hostname:port pairs")
+
+# Training related flags
+flags.DEFINE_string("data_dir",
+                    get_data_path(
+                        dataset_name = "", #all mounted repo
+                        local_root = ROOT_PATH_TO_LOCAL_DATA,
+                        local_repo = "",
+                        path = ""
+                        ),
+                    "Path to store logs and checkpoints. It is recommended"
+                    "to use get_logs_path() to define your logs directory."
+                    "so that you can switch from local to clusterone without"
+                    "changing your code."
+                    "If you set your logs directory manually make sure"
+                    "to use /logs/ when running on ClusterOne cloud.")
+flags.DEFINE_string("log_dir",
+                     get_logs_path(root=PATH_TO_LOCAL_LOGS),
+                    "Path to dataset. It is recommended to use get_data_path()"
+                    "to define your data directory.so that you can switch "
+                    "from local to clusterone without changing your code."
+                    "If you set the data directory manually makue sure to use"
+                    "/data/ as root path when running on ClusterOne cloud.")
+
+
+FLAGS = flags.FLAGS
+		
 # This function defines the master, ClusterSpecs and device setters
 def device_and_target():
     # If FLAGS.job_name is not set, we're running single-machine TensorFlow.
@@ -98,7 +140,7 @@ def device_and_target():
             server.target,
     )
 
-    device, target = device_and_target()        
+device, target = device_and_target()        
 
 # Defining graph
 with tf.device(device):
@@ -112,10 +154,15 @@ with tf.device(device):
 	preds = Dense(bits, activation='sigmoid')(x)
 	labels = tf.placeholder(tf.float32, shape=(None, bits))
 	
+	pred_temp = tf.equal(tf.round(preds), tf.round(labels))
+	accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
+	
 	loss = tf.reduce_mean(losses.mean_squared_error(labels, preds))
 
 	# Defining training optimizer
-	optimizer = tf.train.AdamOptimizer().minimize(loss)
+	optimizer = tf.train.AdamOptimizer()
+	global_step = tf.Variable(0, dtype=tf.int64, name='global_step', trainable=False)
+	train_step = optimizer.minimize(loss,global_step=global_step)
 	
 	# Initialize all variables
 	init = tf.global_variables_initializer()
@@ -124,43 +171,42 @@ with tf.device(device):
 x_train, y_train, x_val, y_val = get_data(train_set_size)
 
 #Defining the number of training steps
-hooks=[tf.train.StopAtStepHook(last_step=100000)]
+hooks=[tf.train.StopAtStepHook(last_step=epochs * (train_set_size/train_batch_size))]
 
 with tf.train.MonitoredTrainingSession(master=target,
 	is_chief=(FLAGS.task_index == 0),
-	checkpoint_dir=FLAGS.logs_dir,
+	checkpoint_dir=FLAGS.log_dir,
 	hooks = hooks) as sess:
 
-	# while not sess.should_stop():
-	#         # execute training step here (read data, feed_dict, session)
-	#         # TODO define training ops
-	#         data_batch = ...
-	#         feed_dict = {...}
-	#         loss, _ = sess.run(...)
-	
 	sess.run(init)
+
+	epoch = 0
+	while not sess.should_stop():
+		epoch += 1
 	
-	for epoch in range(epochs):
+	
+	
+		#for epoch in range(epochs):
 		avg_loss = 0
 		total_batch = int(len(x_train)/train_batch_size)
 		for i in range(total_batch):
 			index1 = i * train_batch_size
 			index2 = (i+1) * train_batch_size
 			batch_x, batch_y = x_train[index1:index2], y_train[index1:index2]
-			_, c = sess.run([optimizer, loss], feed_dict = {input_: batch_x, labels: batch_y, K.learning_phase(): 1})
+			_, c = sess.run([train_step, loss], feed_dict = {input_: batch_x, labels: batch_y, K.learning_phase(): 1})
 			
 			avg_loss += c / total_batch
 
 		if (epoch + 1) % print_rate == 0:
-			pred_temp = tf.equal(tf.round(preds), tf.round(labels))
-			accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
-			val_acc = accuracy.eval({input_: x_val, labels: y_val, K.learning_phase(): 0})
+			# pred_temp = tf.equal(tf.round(preds), tf.round(labels))
+			# accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
+			val_acc = accuracy.eval({input_: x_val, labels: y_val, K.learning_phase(): 0},session = sess)
 			print( "Epoch:", (epoch+1), "Loss =", "{:.5f}".format(avg_loss), "  Validation Accuracy:", val_acc)
 
 	print ("\nTraining complete!")
 
 
 	# find predictions on val set
-	pred_temp = tf.equal(tf.round(preds), tf.round(labels))
-	accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
-	print( "Final Validation Accuracy:", accuracy.eval({input_: x_val, labels: y_val, K.learning_phase(): 0}))
+	# pred_temp = tf.equal(tf.round(preds), tf.round(labels))
+	# accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
+	# print( "Final Validation Accuracy:", accuracy.eval({input_: x_val, labels: y_val, K.learning_phase(): 0}, session = sess))
