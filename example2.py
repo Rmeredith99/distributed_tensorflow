@@ -3,9 +3,11 @@ from keras.models import Sequential
 from keras.layers import Dense, Dropout
 from keras import backend as K
 from keras import losses, metrics
+from keras.callbacks import TensorBoard
 import tensorflow as tf
 from clusterone import get_data_path, get_logs_path
 from random import randint
+from time import time
 import os
 
 
@@ -146,34 +148,32 @@ device, target = device_and_target()
 with tf.device(device):
 	#TODO define your graph here
 	# Defining network
-	input_ = tf.placeholder(tf.float32, shape = (None, 2 * bits))
-	x = Dense(128, activation='relu')(input_)
-	x = Dropout(0.3)(x)
-	x = Dense(128, activation='relu')(x)
-	x = Dropout(0.3)(x)
-	preds = Dense(bits, activation='sigmoid')(x)
-	labels = tf.placeholder(tf.float32, shape=(None, bits))
+	model = Sequential()
+	model.add(Dense(128, input_dim = 2 * bits, activation='relu'))
+	model.add(Dropout(0.3))
+	model.add(Dense(128, activation='relu'))
+	model.add(Dropout(0.3))
+	model.add(Dense(bits, activation='sigmoid'))
 	
-	with tf.name_scope("accuracy"):
-		pred_temp = tf.equal(tf.round(preds), tf.round(labels))
-		accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
-		tf.summary.scalar("accuracy",accuracy)
-		
-	with tf.name_scope("loss"):
-		loss = tf.reduce_mean(losses.mean_squared_error(labels, preds))
-		tf.summary.scalar("loss",loss)
-
-	# Defining training optimizer
-
-	optimizer = tf.train.AdamOptimizer()
-	global_step = tf.Variable(0, dtype=tf.int64, name='global_step', trainable=False)
-	train_step = optimizer.minimize(loss,global_step=global_step)
-
-	summ = tf.summary.merge_all()
+	def xor_metric(y_true,y_pred):
+		b = np.round(y_true) == np.round(y_pred)
+		if b:
+			1.0
+		else:
+			0.0
 	
-	writer = tf.summary.FileWriter(FLAGS.log_dir)
-
-	
+	model.compile(loss = 'mean_squared_error', optimizer = 'adam', metrics = ['accuracy'])
+	# labels = tf.placeholder(tf.float32, shape=(None, bits))
+	# 
+	# pred_temp = tf.equal(tf.round(preds), tf.round(labels))
+	# accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
+	# 
+	# loss = tf.reduce_mean(losses.mean_squared_error(labels, preds))
+	# 
+	# # Defining training optimizer
+	# optimizer = tf.train.AdamOptimizer()
+	# global_step = tf.Variable(0, dtype=tf.int64, name='global_step', trainable=False)
+	# train_step = optimizer.minimize(loss,global_step=global_step)
 	
 	# Initialize all variables
 	init = tf.global_variables_initializer()
@@ -184,51 +184,17 @@ with tf.device(device):
 x_train, y_train, x_val, y_val = get_data(train_set_size)
 
 #Defining the number of training steps
-hooks=[tf.train.StopAtStepHook(last_step=epochs * (train_set_size/train_batch_size))]
-
+#hooks=[tf.train.StopAtStepHook(last_step=epochs * (train_set_size/train_batch_size))]
+# with tf.Session() as sess:
 with tf.train.MonitoredTrainingSession(master=target,
-	is_chief=(FLAGS.task_index == 0),
-	checkpoint_dir=FLAGS.log_dir,
-	hooks = hooks) as sess:
+	is_chief=(FLAGS.task_index == 0)) as sess:
+	# checkpoint_dir=FLAGS.log_dir,
+	# hooks = hooks) as sess:
 
-	#sess.run(init)
-	writer.add_graph(sess.graph)
+	sess.run(init)
+	K.set_session(sess)
 
-	epoch = 0
-	while not sess.should_stop():
-		epoch += 1
+	tensorboard = TensorBoard(log_dir = FLAGS.log_dir.format(time()))
 	
-	
-	
-		# for epoch in range(epochs):
-		avg_loss = 0
-		avg_accuracy = 0
-		total_batch = int(len(x_train)/train_batch_size)
-		for i in range(total_batch):
-			if not sess.should_stop():
-				index1 = i * train_batch_size
-				index2 = (i+1) * train_batch_size
-				batch_x, batch_y = x_train[index1:index2], y_train[index1:index2]
-				
-				train_accuracy, train_loss, s, _ = sess.run([accuracy, loss, summ, train_step], feed_dict = {input_: batch_x, labels: batch_y, K.learning_phase(): 1})
-				#print("Accuracy:",train_accuracy, " Loss:", loss)
-				
-				avg_loss += train_loss / float(total_batch)
-				avg_accuracy += train_accuracy / float(total_batch)
-				
-				writer.add_summary(s, i)
-				
-
-		if (epoch + 1) % print_rate == 0:
-			# pred_temp = tf.equal(tf.round(preds), tf.round(labels))
-			# accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
-			val_acc = accuracy.eval({input_: x_val, labels: y_val, K.learning_phase(): 0},session = sess)
-			print( "Epoch:", (epoch+1), "Loss =", "{:.5f}".format(avg_loss), "  Training Accuracy:", avg_accuracy, "  Validation Accuracy:", val_acc)
-
-	print ("\nTraining complete!")
-
-
-	# find predictions on val set
-	# pred_temp = tf.equal(tf.round(preds), tf.round(labels))
-	# accuracy = tf.reduce_mean(tf.cast(pred_temp, "float"))
-	# print( "Final Validation Accuracy:", accuracy.eval({input_: x_val, labels: y_val, K.learning_phase(): 0}, session = sess))
+	# Running the model
+	model.fit(x_train, y_train, epochs = 20, batch_size = 50, validation_data = (x_val, y_val), callbacks = [tensorboard])
