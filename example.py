@@ -216,7 +216,7 @@ with tf.train.MonitoredTrainingSession(master=target,
 				avg_loss += train_loss / float(total_batch)
 				avg_accuracy += train_accuracy / float(total_batch)
 				
-				writer.add_summary(s, i)
+				writer.add_summary(s, epoch + float(i)/total_batch)
 				
 
 		if (epoch + 1) % print_rate == 0:
